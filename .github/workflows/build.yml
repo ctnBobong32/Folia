@@ -1,4 +1,4 @@
-name: Patch and Build
+name: 补丁与构建
 
 on:
   push:
@@ -7,22 +7,113 @@ on:
 
 jobs:
   build:
-    # Only run on PRs if the source branch is on someone else's repo
+    # 仅当PR的源分支在他人仓库时运行
     if: ${{ github.event_name != 'pull_request' || github.repository != github.event.pull_request.head.repo.full_name }}
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout Git Repository
+      - name: 检出Git仓库
         uses: actions/checkout@v6
-      - name: Set up JDK
+        
+      - name: 设置JDK
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
-      - name: Setup Gradle
+          
+      - name: 设置Gradle
         uses: gradle/actions/setup-gradle@v5
-      - name: Configure Git User Details
+        
+      - name: 配置Git用户信息
         run: git config --global user.email "actions@github.com" && git config --global user.name "Github Actions"
-      - name: Apply Patches
+        
+      - name: 应用补丁
         run: ./gradlew applyAllPatches --stacktrace
-      - name: Build
+        
+      - name: 构建
         run: ./gradlew build
+        
+      - name: 获取环境信息
+        if: github.event_name != 'pull_request'
+        id: env-info
+        run: |
+          # 获取简短的提交哈希
+          commit_short=$(git rev-parse --short HEAD)
+          echo "commit_short=$commit_short" >> $GITHUB_OUTPUT
+          
+          # 获取提交信息
+          commit_message=$(git log -1 --pretty=format:"%s")
+          echo "commit_message=$commit_message" >> $GITHUB_OUTPUT
+          
+          # 生成标签名
+          timestamp=$(date +"%Y%m%d-%H%M")
+          echo "tag=build-$timestamp-$commit_short" >> $GITHUB_OUTPUT
+          
+      - name: 查找构建产物
+        if: github.event_name != 'pull_request'
+        id: find-artifacts
+        run: |
+          # 查找Jar文件
+          jar_file=$(find . -name "*.jar" -type f | grep -v test | head -1)
+          if [ -z "$jar_file" ]; then
+            jar_file=$(find . -path "./build/libs/*.jar" -type f | head -1)
+          fi
+          
+          if [ -n "$jar_file" ]; then
+            echo "jar_file=$jar_file" >> $GITHUB_OUTPUT
+            echo "jar_name=$(basename $jar_file)" >> $GITHUB_OUTPUT
+            echo "✅ 找到构建产物: $jar_file"
+          else
+            echo "❌ 未找到构建产物"
+          fi
+          
+      - name: 上传构建产物
+        if: github.event_name != 'pull_request' && steps.find-artifacts.outputs.jar_file
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: ${{ steps.find-artifacts.outputs.jar_file }}
+          
+      - name: 创建GitHub发布
+        if: github.event_name != 'pull_request' && steps.find-artifacts.outputs.jar_file && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.env-info.outputs.tag }}
+          name: "构建 ${{ steps.env-info.outputs.tag }}"
+          body: |
+            ## 自动构建发布
+            
+            这是一个由GitHub Actions自动构建的版本。
+            
+            **提交**: ${{ steps.env-info.outputs.commit_short }}
+            **提交信息**: ${{ steps.env-info.outputs.commit_message }}
+            **分支**: ${{ github.ref_name }}
+            **构建时间**: ${{ steps.env-info.outputs.timestamp }}
+            
+            此版本是自动生成，可能包含实验性功能。
+          files: ${{ steps.find-artifacts.outputs.jar_file }}
+          draft: false
+          prerelease: true
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: 发布状态总结
+        if: always()
+        run: |
+          echo "=== 构建状态总结 ==="
+          echo "事件类型: ${{ github.event_name }}"
+          echo "分支: ${{ github.ref }}"
+          echo "提交: ${{ steps.env-info.outputs.commit_short || 'N/A' }}"
+          
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ 构建成功"
+            if [ "${{ github.event_name }}" != "pull_request" ] && [ "${{ steps.find-artifacts.outputs.jar_file }}" != "" ]; then
+              echo "📦 构建产物: ${{ steps.find-artifacts.outputs.jar_name }}"
+              if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.ref }}" == "refs/heads/master" ]; then
+                echo "🚀 已创建发布: ${{ steps.env-info.outputs.tag }}"
+              fi
+            fi
+          else
+            echo "❌ 构建失败"
+          fi
