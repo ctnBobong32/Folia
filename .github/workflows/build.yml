@@ -1,196 +1,175 @@
-name: 构建
+name: Foila CI
 
 on:
   push:
-    branches: [ "**" ]
+    branches:
+      - "**"
   pull_request:
+    branches:
+      - "**"
   workflow_dispatch:
     inputs:
-      release_type:
-        description: '发布类型 (release-正式版, beta-测试版, alpha-开发版)'
+      force-release:
+        description: "输入2强制禁用发布，输入1强制发布"
         required: false
-        default: 'beta'
-        type: choice
-        options:
-          - release
-          - beta
-          - alpha
-      force_release:
-        description: '即使不在main/master分支也强制创建发布 (true/false)'
+        default: ""
+      comments:
+        description: "发布备注"
         required: false
-        default: 'false'
-        type: boolean
-      tag_prefix:
-        description: '自定义版本标签前缀 (留空使用默认)'
-        required: false
-        default: ''
-      release_description:
-        description: '添加发布描述信息'
-        required: false
-        default: ''
-      skip_patch:
-        description: '跳过应用补丁步骤 (true/false)'
-        required: false
-        default: 'false'
-        type: boolean
+        default: ""
 
-env:
-  default_tag_prefix: "build"
+permissions:
+  contents: write
 
 jobs:
   build:
-    # 仅当PR的源分支在他人仓库时运行
-    if: ${{ github.event_name != 'pull_request' || github.repository != github.event.pull_request.head.repo.full_name }}
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: 检出Git仓库
-        uses: actions/checkout@v6
-        
-      - name: 设置JDK
-        uses: actions/setup-java@v5
+      # ======================
+      # 基础环境
+      # ======================
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 设置 Java 21
+        uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '21'
-          
-      - name: 设置Gradle
-        uses: gradle/actions/setup-gradle@v5
-        
-      - name: 配置Git用户信息
-        run: git config --global user.email "actions@github.com" && git config --global user.name "Github Actions"
-        
+          distribution: temurin
+          java-version: 21
+
+      - name: 设置 Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Gradle 权限
+        run: chmod +x gradlew
+
+      - name: Git 用户配置
+        run: |
+          git config --global user.name "ctnBobong32"
+          git config --global user.email "actions@262832.xyz"
+
+      # ======================
+      # 构建
+      # ======================
       - name: 应用补丁
-        if: ${{ !inputs.skip_patch || github.event_name != 'workflow_dispatch' }}
-        run: ./gradlew applyAllPatches --stacktrace
-        
-      - name: 跳过应用补丁 (手动触发时可选)
-        if: ${{ inputs.skip_patch && github.event_name == 'workflow_dispatch' }}
-        run: echo "跳过应用补丁步骤"
-        
-      - name: 构建
-        run: ./gradlew build
-        
-      - name: 获取环境信息
+        run: ./gradlew --refresh-dependencies applyAllPatches
+
+      - name: 构建 Paperclip Jar
+        run: ./gradlew --refresh-dependencies createMojmapPaperclipJar
+
+      # ======================
+      # 变量 & 产物处理
+      # ======================
+      - name: 处理构建产物并设置变量
         if: github.event_name != 'pull_request'
-        id: env-info
         run: |
-          # 获取简短的提交哈希
-          commit_short=$(git rev-parse --short HEAD)
-          echo "commit_short=$commit_short" >> $GITHUB_OUTPUT
-          
-          # 获取提交信息
-          commit_message=$(git log -1 --pretty=format:"%s")
-          # 处理多行提交信息
-          commit_message_single_line=$(echo "$commit_message" | tr '\n' ' ' | sed 's/"/\\"/g')
-          echo "commit_message=$commit_message_single_line" >> $GITHUB_OUTPUT
-          
-          # 获取分支名称
-          branch_name=${GITHUB_REF#refs/heads/}
-          echo "branch_name=$branch_name" >> $GITHUB_OUTPUT
-          
-          # 确定标签前缀
-          tag_prefix="${{ inputs.tag_prefix || env.default_tag_prefix }}"
-          echo "tag_prefix=$tag_prefix" >> $GITHUB_OUTPUT
-          
-          # 生成标签名
-          timestamp=$(date +"%Y%m%d-%H%M")
-          echo "tag=$tag_prefix-$timestamp-$commit_short" >> $GITHUB_OUTPUT
-          echo "timestamp=$timestamp" >> $GITHUB_OUTPUT
-          
-          # 确定发布类型
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            release_type="${{ inputs.release_type }}"
-          else
-            # 根据分支名判断发布类型
-            if [[ "$branch_name" == "main" || "$branch_name" == "master" ]]; then
-              release_type="release"
-            elif [[ "$branch_name" == *"beta"* || "$branch_name" == *"test"* ]]; then
-              release_type="beta"
-            else
-              release_type="alpha"
-            fi
+          set -e
+
+          prop() {
+            grep "^[[:space:]]*${1}=" gradle.properties | cut -d'=' -f2 | tr -d '\r'
+          }
+
+          project_id="foila"
+          project_id_b="Foila"
+
+          mcversion=$(prop mcVersion)
+          version=$(prop version)
+          release=$(prop release)
+          commit_id=$(git rev-parse --short HEAD)
+
+          flag_release=false
+          pre=false
+          make_latest=false
+
+          if [ "$release" = "1" ]; then
+            flag_release=true
+            pre=true
+            make_latest=true
+          elif [ "$release" = "2" ]; then
+            flag_release=true
+            make_latest=true
           fi
-          echo "release_type=$release_type" >> $GITHUB_OUTPUT
-          
-      - name: 查找构建产物
-        if: github.event_name != 'pull_request'
-        id: find-artifacts
-        run: |
-          # 查找Jar文件（优先查找paperclip）
-          jar_file=$(find . -name "*paperclip*.jar" -type f 2>/dev/null | head -1)
-          
-          if [ -z "$jar_file" ]; then
-            jar_file=$(find . -name "*.jar" -type f | grep -v test | head -1)
-          fi
-          
-          if [ -z "$jar_file" ]; then
-            jar_file=$(find . -path "./build/libs/*.jar" -type f | head -1)
-          fi
-          
-          if [ -n "$jar_file" ]; then
-            echo "jar_file=$jar_file" >> $GITHUB_OUTPUT
-            echo "jar_name=$(basename $jar_file)" >> $GITHUB_OUTPUT
-            echo "✅ 找到构建产物: $jar_file"
-          else
+
+          original_jar="foila-server/build/libs/${project_id}-paperclip-${version}-mojmap.jar"
+          final_jar="${project_id}-${mcversion}-paperclip.jar"
+          final_path="foila-server/build/libs/${final_jar}"
+
+          if [ ! -f "$original_jar" ]; then
             echo "❌ 未找到构建产物"
+            find foila-server/build/libs -name "*.jar"
+            exit 1
           fi
-          
-      - name: 上传构建产物
-        if: github.event_name != 'pull_request' && steps.find-artifacts.outputs.jar_file
+
+          mv "$original_jar" "$final_path"
+
+          tag="${mcversion}-${commit_id}"
+
+          echo "project_id=$project_id" >> $GITHUB_ENV
+          echo "project_id_b=$project_id_b" >> $GITHUB_ENV
+          echo "mcversion=$mcversion" >> $GITHUB_ENV
+          echo "commit_id=$commit_id" >> $GITHUB_ENV
+          echo "commit_msg=$(git log -1 --pretty='> [%h] %s')" >> $GITHUB_ENV
+          echo "jar=$final_jar" >> $GITHUB_ENV
+          echo "jar_path=$final_path" >> $GITHUB_ENV
+          echo "flag_release=$flag_release" >> $GITHUB_ENV
+          echo "pre=$pre" >> $GITHUB_ENV
+          echo "make_latest=$make_latest" >> $GITHUB_ENV
+          echo "tag=$tag" >> $GITHUB_ENV
+
+      # ======================
+      # 上传 CI Artifact（可选）
+      # ======================
+      - name: 上传 CI 构建产物
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: 构建产物
-          path: ${{ steps.find-artifacts.outputs.jar_file }}
-          
-      - name: 创建GitHub发布
-        if: |
-          github.event_name != 'pull_request' && 
-          steps.find-artifacts.outputs.jar_file && 
-          (
-            github.ref == 'refs/heads/main' || 
-            github.ref == 'refs/heads/master' || 
-            (github.event_name == 'workflow_dispatch' && inputs.force_release == 'true')
-          )
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ steps.env-info.outputs.tag }}
-          name: "构建 ${{ steps.env-info.outputs.tag }}"
-          body: |
-            ## 自动构建发布
-            
-            这是一个由GitHub Actions自动构建的版本。
-            
-            **提交**: ${{ steps.env-info.outputs.commit_short }}
-            **提交信息**: ${{ steps.env-info.outputs.commit_message }}
-            **分支**: ${{ github.ref_name }}
-            **构建时间**: ${{ steps.env-info.outputs.timestamp }}
-            **发布类型**: ${{ steps.env-info.outputs.release_type }}
-            
-            ${{ inputs.release_description && format('**发布描述**: {0}', inputs.release_description) || '此版本是自动生成，可能包含实验性功能。' }}
-            
-          files: ${{ steps.find-artifacts.outputs.jar_file }}
-          draft: false
-          prerelease: ${{ steps.env-info.outputs.release_type != 'release' }}
-          generate_release_notes: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: 构建状态总结
-        if: always()
+          name: Foila-CI
+          path: ${{ env.jar_path }}
+
+      # ======================
+      # Tag 冲突处理
+      # ======================
+      - name: 处理 Tag 冲突
+        if: github.event_name != 'pull_request' && env.flag_release == 'true'
         run: |
-          echo "=== 构建状态总结 ==="
-          echo "事件: ${{ github.event_name }}"
-          echo "分支: ${{ github.ref }}"
-          echo "提交: ${{ steps.env-info.outputs.commit_short || 'N/A' }}"
-          
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "✅ 构建成功"
-            if [ "${{ github.event_name }}" != "pull_request" ] && [ "${{ steps.find-artifacts.outputs.jar_file }}" != "" ]; then
-              echo "📦 构建产物: ${{ steps.find-artifacts.outputs.jar_name }}"
-              if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.ref }}" == "refs/heads/master" ] || ( [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ inputs.force_release }}" == "true" ] ); then
-                echo "🚀 已创建发布: ${{ steps.env-info.outputs.tag }}"
-              fi
-            fi
-          else
-            echo "❌ 构建失败"
-          fi
+          git fetch --tags
+          base="${{ env.tag }}"
+          tag="$base"
+          i=1
+
+          while git tag -l "$tag" | grep -q .; do
+            tag="${base}-${i}"
+            i=$((i+1))
+          done
+
+          echo "tag=$tag" >> $GITHUB_ENV
+
+      # ======================
+      # 创建 GitHub Release
+      # ======================
+      - name: 创建 GitHub Release
+        if: |
+          github.event_name != 'pull_request' &&
+          env.flag_release == 'true' &&
+          inputs.force-release != '2'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.tag }}
+          name: Foila ${{ env.mcversion }} - ${{ env.commit_id }}
+          artifacts: ${{ env.jar_path }}
+          prerelease: ${{ env.pre }}
+          makeLatest: ${{ env.make_latest }}
+          generateReleaseNotes: true
+          body: |
+            📦 版本：`${{ env.mcversion }}`
+            🔖 提交：`${{ env.commit_id }}`
+
+            ${{ inputs.comments && format('### 备注\n> {0}', inputs.comments) || '' }}
+
+            ### 分支
+            > ${{ github.ref_name }}
+
+            ### 提交信息
+            ${{ env.commit_msg }}
+          token: ${{ secrets.GITHUB_TOKEN }}
